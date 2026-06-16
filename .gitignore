@@ -1,0 +1,21 @@
+# Data files
+*.npy
+*.h5
+*.nii
+*.nii.gz
+synapse_data/
+amos_data/
+all-data/
+
+# Model weights and checkpoints
+*.pth
+*.pt
+*.pkl
+logs/
+outputs/
+
+# Python temp files
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
