@@ -22,6 +22,11 @@ parser.add_argument('-g', '--gpu', type=str, default='0')
 parser.add_argument('-w', '--cps_w', type=float, default=1)
 parser.add_argument('-r', '--cps_rampup', action='store_true', default=True) # <--
 parser.add_argument('-cr', '--consistency_rampup', type=float, default=None)
+# Hybrid proxy arguments
+parser.add_argument('--use_variation', action='store_true', default=False)
+parser.add_argument('--lambda_cs', type=float, default=0.1)
+parser.add_argument('--num_variations', type=int, default=5)
+parser.add_argument('--embedding_dim', type=int, default=256)
 args = parser.parse_args()
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 
@@ -34,6 +39,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.cuda.amp import GradScaler, autocast
 
 from models.vnet import VNet
+from proxy_loss import ProjectionHead, CompositionalSimilarityLoss
 from utils import EMA, maybe_mkdir, get_lr, fetch_data, seed_worker, poly_lr, print_func, kaiming_normal_init_weight
 from utils.loss import DC_and_CE_loss, RobustCrossEntropyLoss, SoftDiceLoss
 from data.transforms import RandomCrop, CenterCrop, ToTensor, RandomFlip_LR, RandomFlip_UD
@@ -257,6 +263,24 @@ if __name__ == '__main__':
     model_A = kaiming_normal_init_weight(model_A)
     model_B = kaiming_normal_init_weight(model_B)
 
+    # Proxy modules: one ProjectionHead + one CompositionalSimilarityLoss per model
+    # block_six feature: (B, 256, 8, 16, 16); variation_active defaults to True (R2)
+    proj_head_A = ProjectionHead(in_channels=config.n_filters * 8, embedding_dim=args.embedding_dim, spatial_dims=3).cuda()
+    cs_loss_A   = CompositionalSimilarityLoss(num_classes=config.num_cls, embedding_dim=args.embedding_dim,
+                      use_variation=args.use_variation, num_variations=args.num_variations,
+                      lambda_var=1.0, tau=10.0, gamma=2.0, tau_r=0.8, lambda_r=1.0).cuda()
+    optimizer_proxy_A = optim.SGD(list(proj_head_A.parameters()) + list(cs_loss_A.parameters()),
+                                  lr=args.base_lr, momentum=0.9, weight_decay=3e-5, nesterov=True)
+
+    proj_head_B = ProjectionHead(in_channels=config.n_filters * 8, embedding_dim=args.embedding_dim, spatial_dims=3).cuda()
+    cs_loss_B   = CompositionalSimilarityLoss(num_classes=config.num_cls, embedding_dim=args.embedding_dim,
+                      use_variation=args.use_variation, num_variations=args.num_variations,
+                      lambda_var=1.0, tau=10.0, gamma=2.0, tau_r=0.8, lambda_r=1.0).cuda()
+    optimizer_proxy_B = optim.SGD(list(proj_head_B.parameters()) + list(cs_loss_B.parameters()),
+                                  lr=args.base_lr, momentum=0.9, weight_decay=3e-5, nesterov=True)
+
+    logging.info(f'Proxy: use_variation={args.use_variation}, lambda_cs={args.lambda_cs}, '
+                 f'embedding_dim={args.embedding_dim}, num_variations={args.num_variations}')
 
     # make loss function
     diffdw = DiffDW(config.num_cls, accumulate_iters=50)
@@ -284,9 +308,14 @@ if __name__ == '__main__':
 
         model_A.train()
         model_B.train()
-        for batch_l, batch_u in tqdm(zip(labeled_loader, unlabeled_loader)):
+        proj_head_A.train()
+        proj_head_B.train()
+        loss_cs_list = []
+        for iteration_num, (batch_l, batch_u) in enumerate(tqdm(zip(labeled_loader, unlabeled_loader))):
             optimizer_A.zero_grad()
             optimizer_B.zero_grad()
+            optimizer_proxy_A.zero_grad()
+            optimizer_proxy_B.zero_grad()
 
             image_l, label_l = fetch_data(batch_l)
             image_u = fetch_data(batch_u, labeled=False)
@@ -295,43 +324,59 @@ if __name__ == '__main__':
 
             if args.mixed_precision:
                 with autocast():
-                    output_A = model_A(image)
-                    output_B = model_B(image)
+                    # return_features=True: feat is block_six (B,256,8,16,16), no detach (R6)
+                    output_A, feat_A = model_A(image, return_features=True)
+                    output_B, feat_B = model_B(image, return_features=True)
                     del image
 
                     # sup (ce + dice)
                     output_A_l, output_A_u = output_A[:tmp_bs, ...], output_A[tmp_bs:, ...]
                     output_B_l, output_B_u = output_B[:tmp_bs, ...], output_B[tmp_bs:, ...]
 
-
                     # cps (ce only)
                     max_A = torch.argmax(output_A.detach(), dim=1, keepdim=True).long()
                     max_B = torch.argmax(output_B.detach(), dim=1, keepdim=True).long()
 
-
                     weight_A = diffdw.cal_weights(output_A_l.detach(), label_l.detach())
                     weight_B = distdw.get_ema_weights(output_B_u.detach())
-
-
 
                     loss_func_A.update_weight(weight_A)
                     loss_func_B.update_weight(weight_B)
                     cps_loss_func_A.update_weight(weight_A)
                     cps_loss_func_B.update_weight(weight_B)
 
-
                     loss_sup = loss_func_A(output_A_l, label_l) + loss_func_B(output_B_l, label_l)
                     loss_cps = cps_loss_func_A(output_A, max_B) + cps_loss_func_B(output_B, max_A)
-                    loss = loss_sup + cps_w * loss_cps
 
+                    # Proxy loss: labeled portion only (R4); feat not detached so grad flows to backbone (R6)
+                    emb_A = proj_head_A(feat_A[:tmp_bs])
+                    emb_B = proj_head_B(feat_B[:tmp_bs])
+                    loss_cs_A, stats_A = cs_loss_A(emb_A, label_l)
+                    loss_cs_B, stats_B = cs_loss_B(emb_B, label_l)
+                    loss_cs = loss_cs_A + loss_cs_B
 
+                    loss = loss_sup + cps_w * loss_cps + args.lambda_cs * loss_cs
 
-                # backward passes should not be under autocast.
+                # single backward, four optimizers under same scaler (R8)
                 amp_grad_scaler.scale(loss).backward()
                 amp_grad_scaler.step(optimizer_A)
                 amp_grad_scaler.step(optimizer_B)
+                amp_grad_scaler.step(optimizer_proxy_A)
+                amp_grad_scaler.step(optimizer_proxy_B)
                 amp_grad_scaler.update()
-                # if epoch_num>0:
+
+                # Gradient verification at step 5 (R6 / revision 1); encoder is a method not a module
+                if iteration_num == 5 and epoch_num == 0:
+                    proxy_grad = cs_loss_A.proxy_dist.grad
+                    backbone_grad = next(model_A.block_one.parameters()).grad
+                    logging.info(f'[GradCheck] proxy_dist_A grad norm: '
+                                 f'{proxy_grad.norm().item():.4e} (need >1e-3)')
+                    logging.info(f'[GradCheck] backbone_A first param grad norm: '
+                                 f'{backbone_grad.norm().item():.4e} (need >1e-3)')
+                    if args.use_variation and cs_loss_A.variation_vectors is not None:
+                        var_grad = cs_loss_A.variation_vectors.grad
+                        logging.info(f'[GradCheck] variation_vectors_A grad norm: '
+                                     f'{var_grad.norm().item():.4e} (need >1e-3)')
 
             else:
                 raise NotImplementedError
@@ -339,16 +384,18 @@ if __name__ == '__main__':
             loss_list.append(loss.item())
             loss_sup_list.append(loss_sup.item())
             loss_cps_list.append(loss_cps.item())
+            loss_cs_list.append(loss_cs.item())
 
         writer.add_scalar('lr', get_lr(optimizer_A), epoch_num)
         writer.add_scalar('cps_w', cps_w, epoch_num)
         writer.add_scalar('loss/loss', np.mean(loss_list), epoch_num)
         writer.add_scalar('loss/sup', np.mean(loss_sup_list), epoch_num)
         writer.add_scalar('loss/cps', np.mean(loss_cps_list), epoch_num)
+        writer.add_scalar('loss/cs', np.mean(loss_cs_list), epoch_num)
         # print(dict(zip([i for i in range(config.num_cls)] ,print_func(weight_A))))
         writer.add_scalars('class_weights/A', dict(zip([str(i) for i in range(config.num_cls)] ,print_func(weight_A))), epoch_num)
         writer.add_scalars('class_weights/B', dict(zip([str(i) for i in range(config.num_cls)] ,print_func(weight_B))), epoch_num)
-        logging.info(f'epoch {epoch_num} : loss : {np.mean(loss_list)}')
+        logging.info(f'epoch {epoch_num} : loss : {np.mean(loss_list)} | loss_cs : {np.mean(loss_cs_list):.4f}')
         # logging.info(f'     cps_w: {cps_w}')
         # if epoch_num>0:
         logging.info(f"     Class Weights A: {print_func(weight_A)}, lr: {get_lr(optimizer_A)}")
@@ -358,6 +405,8 @@ if __name__ == '__main__':
         # lr_scheduler_B.step()
         optimizer_A.param_groups[0]['lr'] = poly_lr(epoch_num, args.max_epoch, args.base_lr, 0.9)
         optimizer_B.param_groups[0]['lr'] = poly_lr(epoch_num, args.max_epoch, args.base_lr, 0.9)
+        optimizer_proxy_A.param_groups[0]['lr'] = poly_lr(epoch_num, args.max_epoch, args.base_lr, 0.9)
+        optimizer_proxy_B.param_groups[0]['lr'] = poly_lr(epoch_num, args.max_epoch, args.base_lr, 0.9)
         # print(optimizer_A.param_groups[0]['lr'])
         cps_w = get_current_consistency_weight(epoch_num)
 
