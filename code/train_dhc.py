@@ -27,6 +27,7 @@ parser.add_argument('--use_variation', action='store_true', default=False)
 parser.add_argument('--lambda_cs', type=float, default=0.1)
 parser.add_argument('--num_variations', type=int, default=5)
 parser.add_argument('--embedding_dim', type=int, default=256)
+parser.add_argument('--patience', type=int, default=None)  # overrides config.early_stop_patience
 args = parser.parse_args()
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 
@@ -46,6 +47,8 @@ from data.transforms import RandomCrop, CenterCrop, ToTensor, RandomFlip_LR, Ran
 from data.data_loaders import Synapse_AMOS
 from utils.config import Config
 config = Config(args.task)
+if args.patience is not None:
+    config.early_stop_patience = args.patience
 
 
 
@@ -467,4 +470,7 @@ if __name__ == '__main__':
                 logging.info(f'Early stop.')
                 break
 
+    last_path = os.path.join(snapshot_path, 'ckpts/last_model.pth')
+    torch.save({'A': model_A.state_dict(), 'B': model_B.state_dict()}, last_path)
+    logging.info(f'saved last model to {last_path}')
     writer.close()

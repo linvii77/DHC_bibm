@@ -8,6 +8,7 @@ parser.add_argument('--split', type=str, default='test')
 parser.add_argument('--speed', type=int, default=0)
 parser.add_argument('-g', '--gpu', type=str,  default='0')
 parser.add_argument('--cps', type=str, default=None)
+parser.add_argument('--ckpt', type=str, default='best_model')  # e.g. last_model or best_model
 args = parser.parse_args()
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 
@@ -129,7 +130,7 @@ if __name__ == '__main__':
         model_B.eval()
 
 
-    ckpt_path = os.path.join(snapshot_path, f'ckpts/best_model.pth')
+    ckpt_path = os.path.join(snapshot_path, f'ckpts/{args.ckpt}.pth')
 
 
 
