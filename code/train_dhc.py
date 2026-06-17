@@ -364,12 +364,14 @@ if __name__ == '__main__':
                         loss_cs = torch.tensor(0.0, device='cuda')
                         loss = loss_sup + cps_w * loss_cps
 
-                # single backward, four optimizers under same scaler (R8)
+                # single backward; proxy optimizers only stepped when lambda_cs>0 (scaler
+                # requires inf checks recorded, which only happen when params are used under autocast)
                 amp_grad_scaler.scale(loss).backward()
                 amp_grad_scaler.step(optimizer_A)
                 amp_grad_scaler.step(optimizer_B)
-                amp_grad_scaler.step(optimizer_proxy_A)
-                amp_grad_scaler.step(optimizer_proxy_B)
+                if args.lambda_cs > 0:
+                    amp_grad_scaler.step(optimizer_proxy_A)
+                    amp_grad_scaler.step(optimizer_proxy_B)
                 amp_grad_scaler.update()
 
                 # Gradient verification at step 5 (R6 / revision 1); encoder is a method not a module
