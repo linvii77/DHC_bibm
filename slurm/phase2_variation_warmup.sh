@@ -2,6 +2,7 @@
 # Phase 2: variation warmup sweep (var arm, seed=0, max_epoch=300, patience=200)
 # Run AFTER phase1 to know the best lambda_cs.
 # Usage: bash slurm/phase2_variation_warmup.sh --lambda_cs 0.5
+# HPC: zimuzhang2302@login.hpc.xjtlu.edu.cn, partition=gpu4090, qos=4a800
 
 set -e
 
@@ -30,10 +31,11 @@ submit_job() {
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=24G
+#SBATCH --partition=gpu4090
 #SBATCH --qos=4a800
 
 cd ${ROOT}
-source env.sh
+source slurm/hpc_header.sh
 
 python code/train_dhc.py \\
     --task synapse \\
