@@ -28,6 +28,10 @@ parser.add_argument('--lambda_cs', type=float, default=0.1)
 parser.add_argument('--num_variations', type=int, default=5)
 parser.add_argument('--embedding_dim', type=int, default=256)
 parser.add_argument('--patience', type=int, default=None)  # overrides config.early_stop_patience
+parser.add_argument('--lambda_cs_rampup', type=int, default=0,
+                    help='epochs to linearly ramp lambda_cs from 0 to target (0=no rampup)')
+parser.add_argument('--variation_warmup', type=int, default=0,
+                    help='epochs before variation_active is set to True (0=always active)')
 args = parser.parse_args()
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 
@@ -313,6 +317,20 @@ if __name__ == '__main__':
         model_B.train()
         proj_head_A.train()
         proj_head_B.train()
+
+        # variation_warmup: keep variation_active=False until warmup period ends
+        if args.use_variation and args.variation_warmup > 0:
+            active = (epoch_num >= args.variation_warmup)
+            cs_loss_A.variation_active = active
+            cs_loss_B.variation_active = active
+
+        # lambda_cs rampup: scale from 0 → target over rampup epochs
+        if args.lambda_cs_rampup > 0:
+            rampup_factor = min(1.0, epoch_num / args.lambda_cs_rampup)
+        else:
+            rampup_factor = 1.0
+        effective_lambda_cs = args.lambda_cs * rampup_factor
+
         loss_cs_list = []
         for iteration_num, (batch_l, batch_u) in enumerate(tqdm(zip(labeled_loader, unlabeled_loader))):
             optimizer_A.zero_grad()
@@ -362,7 +380,7 @@ if __name__ == '__main__':
                         loss_cs_A, stats_A = cs_loss_A(emb_A, label_l)
                         loss_cs_B, stats_B = cs_loss_B(emb_B, label_l)
                         loss_cs = loss_cs_A + loss_cs_B
-                        loss = loss_sup + cps_w * loss_cps + args.lambda_cs * loss_cs
+                        loss = loss_sup + cps_w * loss_cps + effective_lambda_cs * loss_cs
                     else:
                         loss_cs = torch.tensor(0.0, device='cuda')
                         loss = loss_sup + cps_w * loss_cps
@@ -404,6 +422,10 @@ if __name__ == '__main__':
         writer.add_scalar('loss/sup', np.mean(loss_sup_list), epoch_num)
         writer.add_scalar('loss/cps', np.mean(loss_cps_list), epoch_num)
         writer.add_scalar('loss/cs', np.mean(loss_cs_list), epoch_num)
+        writer.add_scalar('proxy/lambda_cs_eff', effective_lambda_cs, epoch_num)
+        if args.use_variation:
+            writer.add_scalar('proxy/variation_active',
+                              float(cs_loss_A.variation_active), epoch_num)
         # print(dict(zip([i for i in range(config.num_cls)] ,print_func(weight_A))))
         writer.add_scalars('class_weights/A', dict(zip([str(i) for i in range(config.num_cls)] ,print_func(weight_A))), epoch_num)
         writer.add_scalars('class_weights/B', dict(zip([str(i) for i in range(config.num_cls)] ,print_func(weight_B))), epoch_num)
