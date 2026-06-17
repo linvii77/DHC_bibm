@@ -325,8 +325,12 @@ if __name__ == '__main__':
             if args.mixed_precision:
                 with autocast():
                     # return_features=True: feat is block_six (B,256,8,16,16), no detach (R6)
-                    output_A, feat_A = model_A(image, return_features=True)
-                    output_B, feat_B = model_B(image, return_features=True)
+                    if args.lambda_cs > 0:
+                        output_A, feat_A = model_A(image, return_features=True)
+                        output_B, feat_B = model_B(image, return_features=True)
+                    else:
+                        output_A = model_A(image)
+                        output_B = model_B(image)
                     del image
 
                     # sup (ce + dice)
@@ -348,14 +352,17 @@ if __name__ == '__main__':
                     loss_sup = loss_func_A(output_A_l, label_l) + loss_func_B(output_B_l, label_l)
                     loss_cps = cps_loss_func_A(output_A, max_B) + cps_loss_func_B(output_B, max_A)
 
-                    # Proxy loss: labeled portion only (R4); feat not detached so grad flows to backbone (R6)
-                    emb_A = proj_head_A(feat_A[:tmp_bs])
-                    emb_B = proj_head_B(feat_B[:tmp_bs])
-                    loss_cs_A, stats_A = cs_loss_A(emb_A, label_l)
-                    loss_cs_B, stats_B = cs_loss_B(emb_B, label_l)
-                    loss_cs = loss_cs_A + loss_cs_B
-
-                    loss = loss_sup + cps_w * loss_cps + args.lambda_cs * loss_cs
+                    if args.lambda_cs > 0:
+                        # Proxy loss: labeled portion only (R4); feat not detached so grad flows to backbone (R6)
+                        emb_A = proj_head_A(feat_A[:tmp_bs])
+                        emb_B = proj_head_B(feat_B[:tmp_bs])
+                        loss_cs_A, stats_A = cs_loss_A(emb_A, label_l)
+                        loss_cs_B, stats_B = cs_loss_B(emb_B, label_l)
+                        loss_cs = loss_cs_A + loss_cs_B
+                        loss = loss_sup + cps_w * loss_cps + args.lambda_cs * loss_cs
+                    else:
+                        loss_cs = torch.tensor(0.0, device='cuda')
+                        loss = loss_sup + cps_w * loss_cps
 
                 # single backward, four optimizers under same scaler (R8)
                 amp_grad_scaler.scale(loss).backward()
@@ -366,7 +373,7 @@ if __name__ == '__main__':
                 amp_grad_scaler.update()
 
                 # Gradient verification at step 5 (R6 / revision 1); encoder is a method not a module
-                if iteration_num == 5 and epoch_num == 0:
+                if args.lambda_cs > 0 and iteration_num == 5 and epoch_num == 0:
                     proxy_grad = cs_loss_A.proxy_dist.grad
                     backbone_grad = next(model_A.block_one.parameters()).grad
                     logging.info(f'[GradCheck] proxy_dist_A grad norm: '
