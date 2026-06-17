@@ -4,6 +4,9 @@
 
 source /etc/profile.d/modules.sh
 module load miniconda3/22.11.1-gcc-8.5.0-l4fo6ta
+
+# conda activate doesn't work in non-interactive SLURM shells; use eval approach
+eval "$(conda shell.bash hook)"
 conda activate dhc
 
 # Verify activation
