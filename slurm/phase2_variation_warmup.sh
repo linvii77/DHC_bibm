@@ -1,12 +1,13 @@
 #!/bin/bash
 # Phase 2: variation warmup sweep (var arm, seed=0, max_epoch=300, patience=200)
+# FIXED: base_lr=0.03, split_unlabeled=unlabeled_20p
 # Run AFTER phase1 to know the best lambda_cs.
-# Usage: bash slurm/phase2_variation_warmup.sh --lambda_cs 0.5
+# Usage: bash slurm/phase2_variation_warmup.sh --lambda_cs 0.2
 # HPC: zimuzhang2302@login.hpc.xjtlu.edu.cn, partition=gpu4090, qos=4a800
 
 set -e
 
-BEST_LCS=0.5
+BEST_LCS=0.2
 while [[ $# -gt 0 ]]; do
     case $1 in
         --lambda_cs) BEST_LCS=$2; shift 2;;
@@ -31,7 +32,7 @@ submit_job() {
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=24G
-#SBATCH --partition=gpu4090
+#SBATCH --partition=gpua800
 #SBATCH --qos=4a800
 
 cd ${ROOT}
@@ -41,7 +42,7 @@ python code/train_dhc.py \\
     --task synapse \\
     --exp ${exp} \\
     --seed 0 \\
-    --base_lr 0.001 \\
+    --base_lr 0.03 \\
     -w 0.1 \\
     --use_variation \\
     --lambda_cs ${BEST_LCS} \\
@@ -50,6 +51,7 @@ python code/train_dhc.py \\
     --patience 200 \\
     --embedding_dim 256 \\
     --num_variations 5 \\
+    --split_unlabeled unlabeled_20p \\
     -g 0 -r
 
 echo "=== TEST (best ckpt) ==="
@@ -62,7 +64,9 @@ EOF
     echo "Submitted: ${exp}  (warmup=${warmup}, lambda_cs=${BEST_LCS})"
 }
 
-submit_job "var_w0_s0"    0
-submit_job "var_w30_s0"   30
-submit_job "var_w50_s0"   50
-submit_job "var_w100_s0"  100
+echo "=== Phase 2: variation warmup sweep (lambda_cs=${BEST_LCS}, base_lr=0.03) ==="
+submit_job "hpc_var_w0_s0"    0
+submit_job "hpc_var_w30_s0"   30
+submit_job "hpc_var_w50_s0"   50
+submit_job "hpc_var_w100_s0"  100
+echo "4 jobs submitted."

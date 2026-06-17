@@ -1,12 +1,13 @@
 #!/bin/bash
 # Phase 3: Full ablation (3 seeds × 3 arms) for the paper main table.
+# FIXED: base_lr=0.03, split_unlabeled=unlabeled_20p
 # Run AFTER phase1+2 to fill in BEST_LCS and BEST_WARMUP.
-# Usage: bash slurm/phase3_full_ablation.sh --lambda_cs 0.5 --warmup 50
+# Usage: bash slurm/phase3_full_ablation.sh --lambda_cs 0.2 --warmup 50
 # HPC: zimuzhang2302@login.hpc.xjtlu.edu.cn, partition=gpu4090, qos=4a800
 
 set -e
 
-BEST_LCS=0.5
+BEST_LCS=0.2
 BEST_WARMUP=50
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -32,7 +33,7 @@ make_sbatch_header() {
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=24G
-#SBATCH --partition=gpu4090
+#SBATCH --partition=gpua800
 #SBATCH --qos=4a800
 
 cd ${ROOT}
@@ -48,8 +49,10 @@ submit_baseline() {
         cat << EOF
 python code/train_dhc.py \\
     --task synapse --exp ${exp} --seed ${seed} \\
-    --base_lr 0.001 -w 0.1 --lambda_cs 0 \\
-    --max_epoch 300 --patience 200 -g 0 -r
+    --base_lr 0.03 -w 0.1 --lambda_cs 0 \\
+    --max_epoch 300 --patience 200 \\
+    --split_unlabeled unlabeled_20p \\
+    -g 0 -r
 
 echo "=== TEST ===" && python code/test.py --task synapse --exp ${exp} --cps AB --ckpt best_model --speed 1 -g 0
 echo "=== EVAL ===" && python code/evaluate_our.py --exp ${exp} --cps AB
@@ -66,9 +69,11 @@ submit_no_var() {
         cat << EOF
 python code/train_dhc.py \\
     --task synapse --exp ${exp} --seed ${seed} \\
-    --base_lr 0.001 -w 0.1 --lambda_cs ${BEST_LCS} \\
+    --base_lr 0.03 -w 0.1 --lambda_cs ${BEST_LCS} \\
     --max_epoch 300 --patience 200 \\
-    --embedding_dim 256 --num_variations 5 -g 0 -r
+    --embedding_dim 256 --num_variations 5 \\
+    --split_unlabeled unlabeled_20p \\
+    -g 0 -r
 
 echo "=== TEST ===" && python code/test.py --task synapse --exp ${exp} --cps AB --ckpt best_model --speed 1 -g 0
 echo "=== EVAL ===" && python code/evaluate_our.py --exp ${exp} --cps AB
@@ -85,10 +90,12 @@ submit_var() {
         cat << EOF
 python code/train_dhc.py \\
     --task synapse --exp ${exp} --seed ${seed} \\
-    --base_lr 0.001 -w 0.1 --use_variation --lambda_cs ${BEST_LCS} \\
+    --base_lr 0.03 -w 0.1 --use_variation --lambda_cs ${BEST_LCS} \\
     --variation_warmup ${BEST_WARMUP} \\
     --max_epoch 300 --patience 200 \\
-    --embedding_dim 256 --num_variations 5 -g 0 -r
+    --embedding_dim 256 --num_variations 5 \\
+    --split_unlabeled unlabeled_20p \\
+    -g 0 -r
 
 echo "=== TEST ===" && python code/test.py --task synapse --exp ${exp} --cps AB --ckpt best_model --speed 1 -g 0
 echo "=== EVAL ===" && python code/evaluate_our.py --exp ${exp} --cps AB
@@ -97,7 +104,7 @@ EOF
     sbatch /tmp/run_${exp}.sh && echo "Submitted: ${exp}"
 }
 
-echo "=== Phase 3: Full Ablation ==="
+echo "=== Phase 3: Full Ablation (base_lr=0.03) ==="
 echo "Config: lambda_cs=${BEST_LCS}, variation_warmup=${BEST_WARMUP}"
 for seed in 0 1 666; do
     submit_baseline $seed
