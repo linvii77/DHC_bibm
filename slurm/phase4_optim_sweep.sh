@@ -14,7 +14,7 @@
 source /gpfs/work/aac/zimuzhang2302/DHC_bibm/slurm/hpc_header.sh
 cd /gpfs/work/aac/zimuzhang2302/DHC_bibm
 
-PSEUDO_BASE="--task synapse --lambda_cs 0.2 --max_epoch 300 --patience 200 --base_lr 0.03 --split_unlabeled unlabeled_20p --embedding_dim 256 --num_variations 5 --pseudo_proxy --pseudo_proxy_conf 0.8 --pseudo_proxy_warmup 150 -g 0"
+PSEUDO_BASE="--task synapse --lambda_cs 0.2 -w 0.1 -r --max_epoch 300 --patience 200 --base_lr 0.03 --split_unlabeled unlabeled_20p --embedding_dim 256 --num_variations 5 --pseudo_proxy --pseudo_proxy_conf 0.8 --pseudo_proxy_warmup 150 -g 0"
 
 case "${RUN}" in
   v2_pseudo_s0)
