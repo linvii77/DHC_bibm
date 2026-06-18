@@ -14,23 +14,20 @@
 source /gpfs/work/aac/zimuzhang2302/DHC_bibm/slurm/hpc_header.sh
 cd /gpfs/work/aac/zimuzhang2302/DHC_bibm
 
-BASE="--task synapse --seed 0 --lambda_cs 0.2 --max_epoch 300 --patience 200 --base_lr 0.03 --split_unlabeled unlabeled_20p --embedding_dim 256 --num_variations 5 -g 0"
+PSEUDO_BASE="--task synapse --lambda_cs 0.2 --max_epoch 300 --patience 200 --base_lr 0.03 --split_unlabeled unlabeled_20p --embedding_dim 256 --num_variations 5 --pseudo_proxy --pseudo_proxy_conf 0.8 --pseudo_proxy_warmup 150 -g 0"
 
 case "${RUN}" in
-  v2_bg_s0)
-    python code/train_dhc.py $BASE --exp v2_bg_s0 --proxy_ignore_bg
-    ;;
   v2_pseudo_s0)
-    python code/train_dhc.py $BASE --exp v2_pseudo_s0 \
-      --pseudo_proxy --pseudo_proxy_conf 0.8 --pseudo_proxy_warmup 150
+    python code/train_dhc.py $PSEUDO_BASE --exp v2_pseudo_s0 --seed 0
     ;;
-  v2_both_s0)
-    python code/train_dhc.py $BASE --exp v2_both_s0 \
-      --proxy_ignore_bg \
-      --pseudo_proxy --pseudo_proxy_conf 0.8 --pseudo_proxy_warmup 150
+  v2_pseudo_s1)
+    python code/train_dhc.py $PSEUDO_BASE --exp v2_pseudo_s1 --seed 1
+    ;;
+  v2_pseudo_s666)
+    python code/train_dhc.py $PSEUDO_BASE --exp v2_pseudo_s666 --seed 666
     ;;
   *)
-    echo "Unknown RUN=${RUN}. Use: v2_bg_s0 / v2_pseudo_s0 / v2_both_s0"
+    echo "Unknown RUN=${RUN}. Valid: v2_pseudo_s0 / v2_pseudo_s1 / v2_pseudo_s666"
     exit 1
     ;;
 esac
