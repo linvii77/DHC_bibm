@@ -38,7 +38,7 @@ parser.add_argument('--pseudo_proxy', action='store_true', default=False,
                     help='Expand proxy to unlabeled data via cross-model pseudo-labels')
 parser.add_argument('--pseudo_proxy_conf', type=float, default=0.8,
                     help='Confidence threshold; voxels below this → ignore_index=255')
-parser.add_argument('--pseudo_proxy_warmup', type=int, default=50,
+parser.add_argument('--pseudo_proxy_warmup', type=int, default=150,
                     help='Epochs before pseudo-label proxy activates')
 parser.add_argument('--pseudo_proxy_w', type=float, default=1.0,
                     help='Weight for pseudo-label proxy component vs. labeled component')
