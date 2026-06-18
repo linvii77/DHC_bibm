@@ -405,8 +405,9 @@ if __name__ == '__main__':
                                  f'{backbone_grad.norm().item():.4e} (need >1e-3)')
                     if args.use_variation and cs_loss_A.variation_vectors is not None:
                         var_grad = cs_loss_A.variation_vectors.grad
+                        var_norm = var_grad.norm().item() if var_grad is not None else float('nan')
                         logging.info(f'[GradCheck] variation_vectors_A grad norm: '
-                                     f'{var_grad.norm().item():.4e} (need >1e-3)')
+                                     f'{var_norm:.4e} (active={cs_loss_A.variation_active})')
 
             else:
                 raise NotImplementedError
