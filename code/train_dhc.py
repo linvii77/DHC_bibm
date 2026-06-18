@@ -32,6 +32,16 @@ parser.add_argument('--lambda_cs_rampup', type=int, default=0,
                     help='epochs to linearly ramp lambda_cs from 0 to target (0=no rampup)')
 parser.add_argument('--variation_warmup', type=int, default=0,
                     help='epochs before variation_active is set to True (0=always active)')
+parser.add_argument('--proxy_ignore_bg', action='store_true', default=False,
+                    help='Mask background (class 0) to ignore_index=255 before proxy loss')
+parser.add_argument('--pseudo_proxy', action='store_true', default=False,
+                    help='Expand proxy to unlabeled data via cross-model pseudo-labels')
+parser.add_argument('--pseudo_proxy_conf', type=float, default=0.8,
+                    help='Confidence threshold; voxels below this → ignore_index=255')
+parser.add_argument('--pseudo_proxy_warmup', type=int, default=50,
+                    help='Epochs before pseudo-label proxy activates')
+parser.add_argument('--pseudo_proxy_w', type=float, default=1.0,
+                    help='Weight for pseudo-label proxy component vs. labeled component')
 args = parser.parse_args()
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 
@@ -374,12 +384,46 @@ if __name__ == '__main__':
                     loss_cps = cps_loss_func_A(output_A, max_B) + cps_loss_func_B(output_B, max_A)
 
                     if args.lambda_cs > 0:
-                        # Proxy loss: labeled portion only (R4); feat not detached so grad flows to backbone (R6)
+                        # Labeled proxy; feat not detached so grad flows to backbone (R6)
                         emb_A = proj_head_A(feat_A[:tmp_bs])
                         emb_B = proj_head_B(feat_B[:tmp_bs])
-                        loss_cs_A, stats_A = cs_loss_A(emb_A, label_l)
-                        loss_cs_B, stats_B = cs_loss_B(emb_B, label_l)
+
+                        # Opt A: mask background (class 0 → 255) so CSL ignores it
+                        if args.proxy_ignore_bg:
+                            label_l_px = label_l.clone()
+                            label_l_px[label_l_px == 0] = 255
+                        else:
+                            label_l_px = label_l
+
+                        loss_cs_A, stats_A = cs_loss_A(emb_A, label_l_px)
+                        loss_cs_B, stats_B = cs_loss_B(emb_B, label_l_px)
                         loss_cs = loss_cs_A + loss_cs_B
+
+                        # Opt B: expand proxy to unlabeled via cross-model pseudo-labels
+                        if args.pseudo_proxy and epoch_num >= args.pseudo_proxy_warmup:
+                            with torch.no_grad():
+                                # B's high-conf predictions → targets for A's unlabeled proxy
+                                soft_B_u = torch.softmax(output_B_u.float().detach(), dim=1)
+                                conf_B_u, pseudo_A_u = soft_B_u.max(dim=1)
+                                pseudo_A_u = pseudo_A_u.clone()
+                                pseudo_A_u[conf_B_u < args.pseudo_proxy_conf] = 255
+                                if args.proxy_ignore_bg:
+                                    pseudo_A_u[pseudo_A_u == 0] = 255
+
+                                # A's high-conf predictions → targets for B's unlabeled proxy
+                                soft_A_u = torch.softmax(output_A_u.float().detach(), dim=1)
+                                conf_A_u, pseudo_B_u = soft_A_u.max(dim=1)
+                                pseudo_B_u = pseudo_B_u.clone()
+                                pseudo_B_u[conf_A_u < args.pseudo_proxy_conf] = 255
+                                if args.proxy_ignore_bg:
+                                    pseudo_B_u[pseudo_B_u == 0] = 255
+
+                            emb_A_u = proj_head_A(feat_A[tmp_bs:])
+                            emb_B_u = proj_head_B(feat_B[tmp_bs:])
+                            loss_cs_A_u, _ = cs_loss_A(emb_A_u, pseudo_A_u)
+                            loss_cs_B_u, _ = cs_loss_B(emb_B_u, pseudo_B_u)
+                            loss_cs = loss_cs + args.pseudo_proxy_w * (loss_cs_A_u + loss_cs_B_u)
+
                         loss = loss_sup + cps_w * loss_cps + effective_lambda_cs * loss_cs
                     else:
                         loss_cs = torch.tensor(0.0, device='cuda')
