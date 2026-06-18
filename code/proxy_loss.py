@@ -80,6 +80,7 @@ class CompositionalSimilarityLoss(nn.Module):
         proxy_sigma_min: float = 0.05,
         use_variation: bool = True,
         eps: float = 1.0e-7,
+        max_samples_per_class: int = 0,
     ) -> None:
         super().__init__()
         if num_classes < 1:
@@ -103,6 +104,7 @@ class CompositionalSimilarityLoss(nn.Module):
         self.softmax_scope = softmax_scope
         self.proxy_sigma_min = proxy_sigma_min
         self.use_variation = use_variation
+        self.max_samples_per_class = max_samples_per_class
         # Runtime-toggleable switch for a "variation warmup" schedule: even
         # when use_variation=True (variation_vectors exists), forward()
         # behaves as combined=q_c (no p_sub term, no gradient to
@@ -146,6 +148,8 @@ class CompositionalSimilarityLoss(nn.Module):
 
         targets = self._resize_targets(targets, embeddings.shape[2:])
         flat_embeddings, flat_targets = self._flatten_valid(embeddings, targets)
+        if self.max_samples_per_class > 0:
+            flat_embeddings, flat_targets = self._balance_classes(flat_embeddings, flat_targets)
 
         if flat_embeddings.numel() == 0:
             zero = embeddings.sum() * 0.0
@@ -237,6 +241,26 @@ class CompositionalSimilarityLoss(nn.Module):
             targets.unsqueeze(1).float(), size=size, mode="nearest"
         )
         return resized[:, 0].long()
+
+    def _balance_classes(
+        self, emb: torch.Tensor, targets: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Sample at most max_samples_per_class voxels per class for equal gradient contribution."""
+        balanced_emb, balanced_tgt = [], []
+        for c in range(self.num_classes):
+            mask = targets == c
+            n = mask.sum()
+            if n == 0:
+                continue
+            idx = mask.nonzero(as_tuple=False).squeeze(1)
+            if n > self.max_samples_per_class:
+                perm = torch.randperm(n, device=emb.device)[:self.max_samples_per_class]
+                idx = idx[perm]
+            balanced_emb.append(emb[idx])
+            balanced_tgt.append(targets[idx])
+        if not balanced_emb:
+            return emb, targets
+        return torch.cat(balanced_emb, 0), torch.cat(balanced_tgt, 0)
 
     def _flatten_valid(
         self, embeddings: torch.Tensor, targets: torch.Tensor

@@ -32,6 +32,18 @@ parser.add_argument('--lambda_cs_rampup', type=int, default=0,
                     help='epochs to linearly ramp lambda_cs from 0 to target (0=no rampup)')
 parser.add_argument('--variation_warmup', type=int, default=0,
                     help='epochs before variation_active is set to True (0=always active)')
+parser.add_argument('--tau_var', type=float, default=10.0,
+                    help='softmax temperature for variation sub-distribution (default 10.0; try 5.0 for softer assignment)')
+parser.add_argument('--max_samples_per_class', type=int, default=0,
+                    help='class-balanced sampling in CSL: max voxels per class (0=disabled)')
+parser.add_argument('--pseudo_proxy', action='store_true', default=False,
+                    help='use unlabeled pseudo-labels for proxy loss (backbone detached)')
+parser.add_argument('--pseudo_proxy_warmup', type=int, default=200,
+                    help='epoch to start pseudo_proxy (proxy centers must be stable first)')
+parser.add_argument('--pseudo_proxy_w', type=float, default=0.05,
+                    help='weight for pseudo_proxy loss term')
+parser.add_argument('--pseudo_proxy_w_rampup', type=int, default=50,
+                    help='epochs to linearly ramp pseudo_proxy_w from 0 to target after warmup')
 args = parser.parse_args()
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 
@@ -275,19 +287,23 @@ if __name__ == '__main__':
     proj_head_A = ProjectionHead(in_channels=config.n_filters * 8, embedding_dim=args.embedding_dim, spatial_dims=3).cuda()
     cs_loss_A   = CompositionalSimilarityLoss(num_classes=config.num_cls, embedding_dim=args.embedding_dim,
                       use_variation=args.use_variation, num_variations=args.num_variations,
-                      lambda_var=1.0, tau=10.0, gamma=2.0, tau_r=0.8, lambda_r=1.0).cuda()
+                      lambda_var=1.0, tau=args.tau_var, gamma=2.0, tau_r=0.8, lambda_r=1.0,
+                      max_samples_per_class=args.max_samples_per_class).cuda()
     optimizer_proxy_A = optim.SGD(list(proj_head_A.parameters()) + list(cs_loss_A.parameters()),
                                   lr=args.base_lr, momentum=0.9, weight_decay=3e-5, nesterov=True)
 
     proj_head_B = ProjectionHead(in_channels=config.n_filters * 8, embedding_dim=args.embedding_dim, spatial_dims=3).cuda()
     cs_loss_B   = CompositionalSimilarityLoss(num_classes=config.num_cls, embedding_dim=args.embedding_dim,
                       use_variation=args.use_variation, num_variations=args.num_variations,
-                      lambda_var=1.0, tau=10.0, gamma=2.0, tau_r=0.8, lambda_r=1.0).cuda()
+                      lambda_var=1.0, tau=args.tau_var, gamma=2.0, tau_r=0.8, lambda_r=1.0,
+                      max_samples_per_class=args.max_samples_per_class).cuda()
     optimizer_proxy_B = optim.SGD(list(proj_head_B.parameters()) + list(cs_loss_B.parameters()),
                                   lr=args.base_lr, momentum=0.9, weight_decay=3e-5, nesterov=True)
 
     logging.info(f'Proxy: use_variation={args.use_variation}, lambda_cs={args.lambda_cs}, '
-                 f'embedding_dim={args.embedding_dim}, num_variations={args.num_variations}')
+                 f'embedding_dim={args.embedding_dim}, num_variations={args.num_variations}, '
+                 f'tau_var={args.tau_var}, max_samples_per_class={args.max_samples_per_class}, '
+                 f'pseudo_proxy={args.pseudo_proxy}')
 
     # make loss function
     diffdw = DiffDW(config.num_cls, accumulate_iters=50)
@@ -374,12 +390,25 @@ if __name__ == '__main__':
                     loss_cps = cps_loss_func_A(output_A, max_B) + cps_loss_func_B(output_B, max_A)
 
                     if args.lambda_cs > 0:
-                        # Proxy loss: labeled portion only (R4); feat not detached so grad flows to backbone (R6)
+                        # Proxy loss: labeled portion only; feat not detached so grad flows to backbone
                         emb_A = proj_head_A(feat_A[:tmp_bs])
                         emb_B = proj_head_B(feat_B[:tmp_bs])
                         loss_cs_A, stats_A = cs_loss_A(emb_A, label_l)
                         loss_cs_B, stats_B = cs_loss_B(emb_B, label_l)
                         loss_cs = loss_cs_A + loss_cs_B
+
+                        # pseudo_proxy: unlabeled data with backbone DETACHED → only proj_head + proxy_dist update
+                        if args.pseudo_proxy and epoch_num >= args.pseudo_proxy_warmup:
+                            pp_elapsed = epoch_num - args.pseudo_proxy_warmup
+                            pp_ramp = min(1.0, pp_elapsed / max(1, args.pseudo_proxy_w_rampup))
+                            effective_pseudo_w = args.pseudo_proxy_w * pp_ramp
+                            if effective_pseudo_w > 0:
+                                emb_A_u = proj_head_A(feat_A[tmp_bs:].detach())
+                                emb_B_u = proj_head_B(feat_B[tmp_bs:].detach())
+                                loss_cs_A_u, _ = cs_loss_A(emb_A_u, max_B[tmp_bs:])
+                                loss_cs_B_u, _ = cs_loss_B(emb_B_u, max_A[tmp_bs:])
+                                loss_cs = loss_cs + effective_pseudo_w * (loss_cs_A_u + loss_cs_B_u)
+
                         loss = loss_sup + cps_w * loss_cps + effective_lambda_cs * loss_cs
                     else:
                         loss_cs = torch.tensor(0.0, device='cuda')
