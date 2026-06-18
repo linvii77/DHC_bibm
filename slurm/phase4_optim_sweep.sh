@@ -22,12 +22,12 @@ case "${RUN}" in
     ;;
   v2_pseudo_s0)
     python code/train_dhc.py $BASE --exp v2_pseudo_s0 \
-      --pseudo_proxy --pseudo_proxy_conf 0.8 --pseudo_proxy_warmup 50
+      --pseudo_proxy --pseudo_proxy_conf 0.8 --pseudo_proxy_warmup 150
     ;;
   v2_both_s0)
     python code/train_dhc.py $BASE --exp v2_both_s0 \
       --proxy_ignore_bg \
-      --pseudo_proxy --pseudo_proxy_conf 0.8 --pseudo_proxy_warmup 50
+      --pseudo_proxy --pseudo_proxy_conf 0.8 --pseudo_proxy_warmup 150
     ;;
   *)
     echo "Unknown RUN=${RUN}. Use: v2_bg_s0 / v2_pseudo_s0 / v2_both_s0"
