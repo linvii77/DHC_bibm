@@ -46,6 +46,17 @@ parser.add_argument('--pseudo_proxy_w_rampup', type=int, default=50,
                     help='epochs to linearly ramp pseudo_proxy_w from 0 to target after warmup')
 parser.add_argument('--lambda_sac', type=float, default=0.0,
                     help='weight for SAC (Semantic Anchor Constraint) loss on proxy means (0=disabled)')
+# CDBA-Variation arguments (Phase 7)
+parser.add_argument('--use_cdba', action='store_true', default=False,
+                    help='switch from attraction/repulsion to CDBA (E2P+P2E) loss mode')
+parser.add_argument('--num_proxy_samples', type=int, default=4,
+                    help='S: number of Gaussian samples for rep_term in g(z,c)')
+parser.add_argument('--cdba_unlabeled_warmup', type=int, default=100,
+                    help='epoch to start including unlabeled voxels in CDBA E2P+P2E')
+parser.add_argument('--tau_var_cdba', type=float, default=5.0,
+                    help='logsumexp temperature for var_term in g(z,c)')
+parser.add_argument('--lambda_sac_cdba', type=float, default=0.1,
+                    help='SAC weight in CDBA mode')
 args = parser.parse_args()
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 
@@ -286,23 +297,26 @@ if __name__ == '__main__':
 
     # Proxy modules: one ProjectionHead + one CompositionalSimilarityLoss per model
     # block_six feature: (B, 256, 8, 16, 16); variation_active defaults to True (R2)
+    _use_variation = True if args.use_cdba else args.use_variation
     proj_head_A = ProjectionHead(in_channels=config.n_filters * 8, embedding_dim=args.embedding_dim, spatial_dims=3).cuda()
     cs_loss_A   = CompositionalSimilarityLoss(num_classes=config.num_cls, embedding_dim=args.embedding_dim,
-                      use_variation=args.use_variation, num_variations=args.num_variations,
+                      use_variation=_use_variation, num_variations=args.num_variations,
                       lambda_var=1.0, tau=args.tau_var, gamma=2.0, tau_r=0.8, lambda_r=1.0,
-                      max_samples_per_class=args.max_samples_per_class).cuda()
+                      max_samples_per_class=args.max_samples_per_class,
+                      num_proxy_samples=args.num_proxy_samples, tau_var_cdba=args.tau_var_cdba).cuda()
     optimizer_proxy_A = optim.SGD(list(proj_head_A.parameters()) + list(cs_loss_A.parameters()),
                                   lr=args.base_lr, momentum=0.9, weight_decay=3e-5, nesterov=True)
 
     proj_head_B = ProjectionHead(in_channels=config.n_filters * 8, embedding_dim=args.embedding_dim, spatial_dims=3).cuda()
     cs_loss_B   = CompositionalSimilarityLoss(num_classes=config.num_cls, embedding_dim=args.embedding_dim,
-                      use_variation=args.use_variation, num_variations=args.num_variations,
+                      use_variation=_use_variation, num_variations=args.num_variations,
                       lambda_var=1.0, tau=args.tau_var, gamma=2.0, tau_r=0.8, lambda_r=1.0,
-                      max_samples_per_class=args.max_samples_per_class).cuda()
+                      max_samples_per_class=args.max_samples_per_class,
+                      num_proxy_samples=args.num_proxy_samples, tau_var_cdba=args.tau_var_cdba).cuda()
     optimizer_proxy_B = optim.SGD(list(proj_head_B.parameters()) + list(cs_loss_B.parameters()),
                                   lr=args.base_lr, momentum=0.9, weight_decay=3e-5, nesterov=True)
 
-    logging.info(f'Proxy: use_variation={args.use_variation}, lambda_cs={args.lambda_cs}, '
+    logging.info(f'Proxy: use_variation={_use_variation}, use_cdba={args.use_cdba}, lambda_cs={args.lambda_cs}, '
                  f'embedding_dim={args.embedding_dim}, num_variations={args.num_variations}, '
                  f'tau_var={args.tau_var}, max_samples_per_class={args.max_samples_per_class}, '
                  f'pseudo_proxy={args.pseudo_proxy}')
@@ -337,7 +351,7 @@ if __name__ == '__main__':
         proj_head_B.train()
 
         # variation_warmup: keep variation_active=False until warmup period ends
-        if args.use_variation and args.variation_warmup > 0:
+        if _use_variation and args.variation_warmup > 0:
             active = (epoch_num >= args.variation_warmup)
             cs_loss_A.variation_active = active
             cs_loss_B.variation_active = active
@@ -392,31 +406,55 @@ if __name__ == '__main__':
                     loss_cps = cps_loss_func_A(output_A, max_B) + cps_loss_func_B(output_B, max_A)
 
                     if args.lambda_cs > 0:
-                        # Proxy loss: labeled portion only; feat not detached so grad flows to backbone
-                        emb_A = proj_head_A(feat_A[:tmp_bs])
-                        emb_B = proj_head_B(feat_B[:tmp_bs])
-                        loss_cs_A, stats_A = cs_loss_A(emb_A, label_l)
-                        loss_cs_B, stats_B = cs_loss_B(emb_B, label_l)
-                        loss_cs = loss_cs_A + loss_cs_B
+                        if args.use_cdba:
+                            # CDBA mode: proj_head runs on ALL patches (labeled + unlabeled)
+                            emb_A_all = proj_head_A(feat_A)
+                            emb_B_all = proj_head_B(feat_B)
+                            emb_A_lab = emb_A_all[:tmp_bs]
+                            emb_B_lab = emb_B_all[:tmp_bs]
+                            emb_A_unl = emb_A_all[tmp_bs:]
+                            emb_B_unl = emb_B_all[tmp_bs:]
 
-                        # SAC: align proxy means with per-class embedding centroids (backbone detached via anchor)
-                        if args.lambda_sac > 0:
-                            loss_cs = loss_cs + args.lambda_sac * (
-                                cs_loss_A.sac_loss(emb_A, label_l) +
-                                cs_loss_B.sac_loss(emb_B, label_l)
-                            )
+                            # Labeled CDBA (E2P + P2E) + SAC
+                            loss_cs = (cs_loss_A.forward_cdba(emb_A_lab, label_l) +
+                                       cs_loss_B.forward_cdba(emb_B_lab, label_l))
+                            if args.lambda_sac_cdba > 0:
+                                loss_cs = loss_cs + args.lambda_sac_cdba * (
+                                    cs_loss_A.sac_loss(emb_A_lab, label_l) +
+                                    cs_loss_B.sac_loss(emb_B_lab, label_l)
+                                )
+                            # Unlabeled CDBA after warmup (label-free E2P + P2E)
+                            if epoch_num >= args.cdba_unlabeled_warmup:
+                                loss_cs = loss_cs + 0.5 * (
+                                    cs_loss_A.forward_cdba(emb_A_unl) +
+                                    cs_loss_B.forward_cdba(emb_B_unl)
+                                )
+                        else:
+                            # 5A path: attraction/repulsion, labeled only
+                            emb_A = proj_head_A(feat_A[:tmp_bs])
+                            emb_B = proj_head_B(feat_B[:tmp_bs])
+                            loss_cs_A, stats_A = cs_loss_A(emb_A, label_l)
+                            loss_cs_B, stats_B = cs_loss_B(emb_B, label_l)
+                            loss_cs = loss_cs_A + loss_cs_B
 
-                        # pseudo_proxy: unlabeled data with backbone DETACHED → only proj_head + proxy_dist update
-                        if args.pseudo_proxy and epoch_num >= args.pseudo_proxy_warmup:
-                            pp_elapsed = epoch_num - args.pseudo_proxy_warmup
-                            pp_ramp = min(1.0, pp_elapsed / max(1, args.pseudo_proxy_w_rampup))
-                            effective_pseudo_w = args.pseudo_proxy_w * pp_ramp
-                            if effective_pseudo_w > 0:
-                                emb_A_u = proj_head_A(feat_A[tmp_bs:].detach())
-                                emb_B_u = proj_head_B(feat_B[tmp_bs:].detach())
-                                loss_cs_A_u, _ = cs_loss_A(emb_A_u, max_B[tmp_bs:])
-                                loss_cs_B_u, _ = cs_loss_B(emb_B_u, max_A[tmp_bs:])
-                                loss_cs = loss_cs + effective_pseudo_w * (loss_cs_A_u + loss_cs_B_u)
+                            # SAC: align proxy means with per-class embedding centroids (backbone detached via anchor)
+                            if args.lambda_sac > 0:
+                                loss_cs = loss_cs + args.lambda_sac * (
+                                    cs_loss_A.sac_loss(emb_A, label_l) +
+                                    cs_loss_B.sac_loss(emb_B, label_l)
+                                )
+
+                            # pseudo_proxy: unlabeled data with backbone DETACHED → only proj_head + proxy_dist update
+                            if args.pseudo_proxy and epoch_num >= args.pseudo_proxy_warmup:
+                                pp_elapsed = epoch_num - args.pseudo_proxy_warmup
+                                pp_ramp = min(1.0, pp_elapsed / max(1, args.pseudo_proxy_w_rampup))
+                                effective_pseudo_w = args.pseudo_proxy_w * pp_ramp
+                                if effective_pseudo_w > 0:
+                                    emb_A_u = proj_head_A(feat_A[tmp_bs:].detach())
+                                    emb_B_u = proj_head_B(feat_B[tmp_bs:].detach())
+                                    loss_cs_A_u, _ = cs_loss_A(emb_A_u, max_B[tmp_bs:])
+                                    loss_cs_B_u, _ = cs_loss_B(emb_B_u, max_A[tmp_bs:])
+                                    loss_cs = loss_cs + effective_pseudo_w * (loss_cs_A_u + loss_cs_B_u)
 
                         loss = loss_sup + cps_w * loss_cps + effective_lambda_cs * loss_cs
                     else:
@@ -463,7 +501,7 @@ if __name__ == '__main__':
         writer.add_scalar('loss/cs', np.mean(loss_cs_list), epoch_num)
         writer.add_scalar('proxy/lambda_cs_eff', effective_lambda_cs, epoch_num)
         writer.add_scalar('proxy/lambda_sac', args.lambda_sac, epoch_num)
-        if args.use_variation:
+        if _use_variation:
             writer.add_scalar('proxy/variation_active',
                               float(cs_loss_A.variation_active), epoch_num)
         # print(dict(zip([i for i in range(config.num_cls)] ,print_func(weight_A))))

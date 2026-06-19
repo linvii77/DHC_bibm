@@ -81,6 +81,8 @@ class CompositionalSimilarityLoss(nn.Module):
         use_variation: bool = True,
         eps: float = 1.0e-7,
         max_samples_per_class: int = 0,
+        num_proxy_samples: int = 4,
+        tau_var_cdba: float = 5.0,
     ) -> None:
         super().__init__()
         if num_classes < 1:
@@ -105,6 +107,8 @@ class CompositionalSimilarityLoss(nn.Module):
         self.proxy_sigma_min = proxy_sigma_min
         self.use_variation = use_variation
         self.max_samples_per_class = max_samples_per_class
+        self.num_proxy_samples = num_proxy_samples
+        self.tau_var_cdba = tau_var_cdba
         # Runtime-toggleable switch for a "variation warmup" schedule: even
         # when use_variation=True (variation_vectors exists), forward()
         # behaves as combined=q_c (no p_sub term, no gradient to
@@ -131,7 +135,8 @@ class CompositionalSimilarityLoss(nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        nn.init.xavier_uniform_(self.proxy_dist)
+        nn.init.xavier_uniform_(self.proxy_dist[:, :self.embedding_dim])
+        nn.init.constant_(self.proxy_dist[:, self.embedding_dim:], -2.0)
         if self.use_variation:
             nn.init.xavier_uniform_(self.variation_vectors)
 
@@ -325,6 +330,44 @@ class CompositionalSimilarityLoss(nn.Module):
             total = total + (1.0 - (mu_norm[c] * anchor_c).sum())
             count += 1
         return total / max(count, 1)
+
+    def _compute_g(self, x: torch.Tensor) -> torch.Tensor:
+        """[N, C] factorized score g(z,c) = rep_term + lambda_var * var_term."""
+        mu, sigma = self._proxy_params()
+        S = self.num_proxy_samples
+        eps = torch.randn(S, self.num_classes, self.embedding_dim, device=x.device)
+        samples = mu.unsqueeze(0) + sigma.unsqueeze(0) * eps  # [S, C, D]
+        samples = F.normalize(samples, p=2, dim=-1)
+        rep_term = torch.einsum('nd,scd->nc', x, samples) / S  # [N, C]
+        if self.use_variation and self.variation_active and self.variation_vectors is not None:
+            variations = F.normalize(self.variation_vectors, p=2, dim=-1)  # [C, K, D]
+            var_sims = torch.einsum('nd,ckd->nck', x, variations)         # [N, C, K]
+            var_term = torch.logsumexp(self.tau_var_cdba * var_sims, dim=-1) / self.tau_var_cdba
+            return rep_term + self.lambda_var * var_term
+        return rep_term
+
+    def forward_cdba(self, embeddings: torch.Tensor, targets=None) -> torch.Tensor:
+        """CDBA: E2P + P2E.
+
+        targets=None → unlabeled mode (all voxels, no label filtering).
+        targets given → labeled mode (filter valid pixels, apply class balance).
+        """
+        if targets is not None:
+            targets = self._resize_targets(targets, embeddings.shape[2:])
+            flat_emb, flat_tgt = self._flatten_valid(embeddings, targets)
+            if self.max_samples_per_class > 0:
+                flat_emb, flat_tgt = self._balance_classes(flat_emb, flat_tgt)
+        else:
+            flat_emb = embeddings.movedim(1, -1).reshape(-1, embeddings.shape[1])
+        if flat_emb.numel() == 0:
+            return embeddings.sum() * 0.0
+        x = F.normalize(flat_emb, p=2, dim=1)
+        g = self._compute_g(x)               # [N, C]
+        P = torch.softmax(g, dim=1)          # [N, C]
+        loss_e2p = (P * (1.0 - g)).sum(dim=1).mean()
+        E_diff = ((2.0 * P - 1.0) * g).mean(dim=0)  # [C]
+        loss_p2e = torch.exp(-E_diff).mean()
+        return loss_e2p + loss_p2e
 
     def _negative_probability(
         self, joint_prob: torch.Tensor, flat_targets: torch.Tensor
