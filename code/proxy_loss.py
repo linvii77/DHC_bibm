@@ -362,10 +362,11 @@ class CompositionalSimilarityLoss(nn.Module):
         if flat_emb.numel() == 0:
             return embeddings.sum() * 0.0
         x = F.normalize(flat_emb, p=2, dim=1)
-        g = self._compute_g(x)               # [N, C]
-        P = torch.softmax(g, dim=1)          # [N, C]
-        loss_e2p = (P * (1.0 - g)).sum(dim=1).mean()
-        E_diff = ((2.0 * P - 1.0) * g).mean(dim=0)  # [C]
+        g = self._compute_g(x)               # [N, C] — unbounded
+        P = torch.softmax(g, dim=1)          # [N, C] — use full g for sharper softmax
+        g_c = g.clamp(-1.0, 1.0)            # bounded g for loss: keeps 1-g_c in [0,2]
+        loss_e2p = (P * (1.0 - g_c)).sum(dim=1).mean()
+        E_diff = ((2.0 * P - 1.0) * g_c).mean(dim=0)  # [C]
         loss_p2e = torch.exp(-E_diff).mean()
         return loss_e2p + loss_p2e
 
