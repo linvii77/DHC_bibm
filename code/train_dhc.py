@@ -44,6 +44,8 @@ parser.add_argument('--pseudo_proxy_w', type=float, default=0.05,
                     help='weight for pseudo_proxy loss term')
 parser.add_argument('--pseudo_proxy_w_rampup', type=int, default=50,
                     help='epochs to linearly ramp pseudo_proxy_w from 0 to target after warmup')
+parser.add_argument('--lambda_sac', type=float, default=0.0,
+                    help='weight for SAC (Semantic Anchor Constraint) loss on proxy means (0=disabled)')
 args = parser.parse_args()
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 
@@ -397,6 +399,13 @@ if __name__ == '__main__':
                         loss_cs_B, stats_B = cs_loss_B(emb_B, label_l)
                         loss_cs = loss_cs_A + loss_cs_B
 
+                        # SAC: align proxy means with per-class embedding centroids (backbone detached via anchor)
+                        if args.lambda_sac > 0:
+                            loss_cs = loss_cs + args.lambda_sac * (
+                                cs_loss_A.sac_loss(emb_A, label_l) +
+                                cs_loss_B.sac_loss(emb_B, label_l)
+                            )
+
                         # pseudo_proxy: unlabeled data with backbone DETACHED → only proj_head + proxy_dist update
                         if args.pseudo_proxy and epoch_num >= args.pseudo_proxy_warmup:
                             pp_elapsed = epoch_num - args.pseudo_proxy_warmup
@@ -453,6 +462,7 @@ if __name__ == '__main__':
         writer.add_scalar('loss/cps', np.mean(loss_cps_list), epoch_num)
         writer.add_scalar('loss/cs', np.mean(loss_cs_list), epoch_num)
         writer.add_scalar('proxy/lambda_cs_eff', effective_lambda_cs, epoch_num)
+        writer.add_scalar('proxy/lambda_sac', args.lambda_sac, epoch_num)
         if args.use_variation:
             writer.add_scalar('proxy/variation_active',
                               float(cs_loss_A.variation_active), epoch_num)

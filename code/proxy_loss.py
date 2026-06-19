@@ -303,6 +303,29 @@ class CompositionalSimilarityLoss(nn.Module):
         flat_prob = torch.softmax(self.tau * flat_scores, dim=1)
         return flat_prob.view(-1, self.num_classes, self.num_variations)
 
+    def sac_loss(self, embeddings: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """Semantic Anchor Constraint: align proxy means with mean labeled embeddings.
+
+        anchor is detached so gradients only update proxy_dist, not backbone/proj_head.
+        """
+        targets = self._resize_targets(targets, embeddings.shape[2:])
+        flat_emb, flat_tgt = self._flatten_valid(embeddings, targets)
+        if flat_emb.numel() == 0:
+            return embeddings.sum() * 0.0
+        x = F.normalize(flat_emb, p=2, dim=1)
+        mu, _ = self._proxy_params()
+        mu_norm = F.normalize(mu, p=2, dim=1)
+        total = x.new_zeros(())
+        count = 0
+        for c in range(self.num_classes):
+            mask = flat_tgt == c
+            if mask.sum() == 0:
+                continue
+            anchor_c = F.normalize(x[mask].mean(0).detach(), p=2, dim=0)
+            total = total + (1.0 - (mu_norm[c] * anchor_c).sum())
+            count += 1
+        return total / max(count, 1)
+
     def _negative_probability(
         self, joint_prob: torch.Tensor, flat_targets: torch.Tensor
     ) -> torch.Tensor:
