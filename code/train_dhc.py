@@ -57,6 +57,10 @@ parser.add_argument('--tau_var_cdba', type=float, default=5.0,
                     help='logsumexp temperature for var_term in g(z,c)')
 parser.add_argument('--lambda_sac_cdba', type=float, default=0.1,
                     help='SAC weight in CDBA mode')
+parser.add_argument('--cdba_unlabeled_weight', type=float, default=0.5,
+                    help='weight for unlabeled CDBA loss (default 0.5, was hardcoded)')
+parser.add_argument('--cdba_unlabeled_weight_rampup', type=int, default=0,
+                    help='epochs to linearly ramp cdba_unlabeled_weight from 0 to target after warmup (0=no ramp)')
 args = parser.parse_args()
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 
@@ -424,12 +428,19 @@ if __name__ == '__main__':
                             # Unlabeled CDBA after warmup: backbone detached so only
                             # proj_head + proxy_dist update (EM M-step, no backbone noise)
                             if epoch_num >= args.cdba_unlabeled_warmup:
-                                emb_A_unl = proj_head_A(feat_A[tmp_bs:].detach())
-                                emb_B_unl = proj_head_B(feat_B[tmp_bs:].detach())
-                                loss_cs = loss_cs + 0.5 * (
-                                    cs_loss_A.forward_cdba(emb_A_unl) +
-                                    cs_loss_B.forward_cdba(emb_B_unl)
-                                )
+                                elapsed_unl = epoch_num - args.cdba_unlabeled_warmup
+                                if args.cdba_unlabeled_weight_rampup > 0:
+                                    unl_ramp = min(1.0, elapsed_unl / args.cdba_unlabeled_weight_rampup)
+                                else:
+                                    unl_ramp = 1.0
+                                eff_unl_w = args.cdba_unlabeled_weight * unl_ramp
+                                if eff_unl_w > 0:
+                                    emb_A_unl = proj_head_A(feat_A[tmp_bs:].detach())
+                                    emb_B_unl = proj_head_B(feat_B[tmp_bs:].detach())
+                                    loss_cs = loss_cs + eff_unl_w * (
+                                        cs_loss_A.forward_cdba(emb_A_unl) +
+                                        cs_loss_B.forward_cdba(emb_B_unl)
+                                    )
                         else:
                             # 5A path: attraction/repulsion, labeled only
                             emb_A = proj_head_A(feat_A[:tmp_bs])
