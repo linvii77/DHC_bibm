@@ -359,6 +359,11 @@ class CompositionalSimilarityLoss(nn.Module):
                 flat_emb, flat_tgt = self._balance_classes(flat_emb, flat_tgt)
         else:
             flat_emb = embeddings.movedim(1, -1).reshape(-1, embeddings.shape[1])
+            # cap unlabeled voxels to match labeled budget → prevents gradient imbalance
+            max_vox = self.max_samples_per_class * self.num_classes
+            if max_vox > 0 and flat_emb.shape[0] > max_vox:
+                idx = torch.randperm(flat_emb.shape[0], device=flat_emb.device)[:max_vox]
+                flat_emb = flat_emb[idx]
         if flat_emb.numel() == 0:
             return embeddings.sum() * 0.0
         x = F.normalize(flat_emb, p=2, dim=1)
@@ -367,7 +372,8 @@ class CompositionalSimilarityLoss(nn.Module):
         g_c = g.clamp(-1.0, 1.0)            # bounded g for loss: keeps 1-g_c in [0,2]
         loss_e2p = (P * (1.0 - g_c)).sum(dim=1).mean()
         E_diff = ((2.0 * P - 1.0) * g_c).mean(dim=0)  # [C]
-        loss_p2e = torch.exp(-E_diff).mean()
+        # softplus is bounded (unlike exp) — avoids P2E explosion when E_diff << 0
+        loss_p2e = F.softplus(-E_diff).mean()
         return loss_e2p + loss_p2e
 
     def _negative_probability(

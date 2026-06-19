@@ -412,8 +412,6 @@ if __name__ == '__main__':
                             emb_B_all = proj_head_B(feat_B)
                             emb_A_lab = emb_A_all[:tmp_bs]
                             emb_B_lab = emb_B_all[:tmp_bs]
-                            emb_A_unl = emb_A_all[tmp_bs:]
-                            emb_B_unl = emb_B_all[tmp_bs:]
 
                             # Labeled CDBA (E2P + P2E) + SAC
                             loss_cs = (cs_loss_A.forward_cdba(emb_A_lab, label_l) +
@@ -423,8 +421,11 @@ if __name__ == '__main__':
                                     cs_loss_A.sac_loss(emb_A_lab, label_l) +
                                     cs_loss_B.sac_loss(emb_B_lab, label_l)
                                 )
-                            # Unlabeled CDBA after warmup (label-free E2P + P2E)
+                            # Unlabeled CDBA after warmup: backbone detached so only
+                            # proj_head + proxy_dist update (EM M-step, no backbone noise)
                             if epoch_num >= args.cdba_unlabeled_warmup:
+                                emb_A_unl = proj_head_A(feat_A[tmp_bs:].detach())
+                                emb_B_unl = proj_head_B(feat_B[tmp_bs:].detach())
                                 loss_cs = loss_cs + 0.5 * (
                                     cs_loss_A.forward_cdba(emb_A_unl) +
                                     cs_loss_B.forward_cdba(emb_B_unl)
