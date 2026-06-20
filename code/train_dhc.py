@@ -463,8 +463,9 @@ if __name__ == '__main__':
                     if args.lambda_cs > 0:
                         if args.use_fused_proxy:
                             # FusedProxy: projects internally, CDBA on full batch (μ/σ detached), SAC on labeled
-                            loss_cdba_A, loss_sac_A, _ = fused_proxy_A(feat_A, label_l, labeled_bs=tmp_bs)
-                            loss_cdba_B, loss_sac_B, _ = fused_proxy_B(feat_B, label_l, labeled_bs=tmp_bs)
+                            _label_l_3d = label_l.squeeze(1)  # [bs,1,D,H,W] → [bs,D,H,W]
+                            loss_cdba_A, loss_sac_A, _ = fused_proxy_A(feat_A, _label_l_3d, labeled_bs=tmp_bs)
+                            loss_cdba_B, loss_sac_B, _ = fused_proxy_B(feat_B, _label_l_3d, labeled_bs=tmp_bs)
                             loss_cs = (loss_cdba_A + loss_cdba_B) + args.lambda_sac_cdba * (loss_sac_A + loss_sac_B)
                         elif args.use_cdba:
                             # CDBA mode: proj_head runs on ALL patches (labeled + unlabeled)
