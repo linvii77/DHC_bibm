@@ -355,10 +355,11 @@ if __name__ == '__main__':
         optimizer_proxy_B = optim.SGD(list(proj_head_B.parameters()) + list(cs_loss_B.parameters()),
                                       lr=args.base_lr, momentum=0.9, weight_decay=3e-5, nesterov=True)
 
-    logging.info(f'Proxy: use_variation={_use_variation}, use_cdba={args.use_cdba}, lambda_cs={args.lambda_cs}, '
-                 f'embedding_dim={args.embedding_dim}, num_variations={args.num_variations}, '
-                 f'tau_var={args.tau_var}, max_samples_per_class={args.max_samples_per_class}, '
-                 f'pseudo_proxy={args.pseudo_proxy}')
+    if not args.use_fused_proxy:
+        logging.info(f'Proxy: use_variation={_use_variation}, use_cdba={args.use_cdba}, lambda_cs={args.lambda_cs}, '
+                     f'embedding_dim={args.embedding_dim}, num_variations={args.num_variations}, '
+                     f'tau_var={args.tau_var}, max_samples_per_class={args.max_samples_per_class}, '
+                     f'pseudo_proxy={args.pseudo_proxy}')
 
     # make loss function
     diffdw = DiffDW(config.num_cls, accumulate_iters=50)
