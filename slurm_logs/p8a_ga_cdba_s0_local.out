@@ -1,0 +1,20 @@
+Namespace(task='synapse', exp='p8a_ga_cdba_s0', seed=0, split_labeled='labeled_20p', split_unlabeled='unlabeled_20p', split_eval='eval', mixed_precision=True, max_epoch=300, cps_loss='wce', sup_loss='w_ce+dice', batch_size=2, num_workers=2, base_lr=0.03, gpu='0', cps_w=0.1, cps_rampup=True, consistency_rampup=None, use_variation=False, lambda_cs=0.2, num_variations=5, embedding_dim=256, patience=200, lambda_cs_rampup=0, variation_warmup=100, tau_var=10.0, max_samples_per_class=200, pseudo_proxy=False, pseudo_proxy_warmup=200, pseudo_proxy_w=0.05, pseudo_proxy_w_rampup=50, lambda_sac=0.0, use_cdba=True, num_proxy_samples=4, cdba_unlabeled_warmup=150, tau_var_cdba=5.0, lambda_sac_cdba=0.1, use_ga_loss=True, ga_k=10, ga_gama=0.5)
+total 16 datas
+total 16 datas
+total 4 datas
+  0%|          | 0/4 [00:00<?, ?it/s]100%|██████████| 4/4 [00:00<00:00, 199.00it/s]
+8 itertations per epoch (labeled)
+8 itertations per epoch (unlabeled)
+Proxy: use_variation=True, use_cdba=True, lambda_cs=0.2, embedding_dim=256, num_variations=5, tau_var=10.0, max_samples_per_class=200, pseudo_proxy=False
+/home/xjtluaiac2024/miniconda3/lib/python3.12/site-packages/torch/nn/_reduction.py:42: UserWarning: size_average and reduce args will be deprecated, please use reduction='none' instead.
+  warnings.warn(warning.format(ret))
+GA Loss: GADice(GA=True) + GACE(k=10, gama=0.5)
+0it [00:00, ?it/s]0it [00:00, ?it/s]
+Traceback (most recent call last):
+  File "/home/xjtluaiac2024/Desktop/DHC-main/code/train_dhc.py", line 409, in <module>
+    weight_A = diffdw.cal_weights(output_A_l.detach(), label_l.detach())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/xjtluaiac2024/Desktop/DHC-main/code/train_dhc.py", line 246, in cal_weights
+    y_onehot = torch.zeros(pred.shape).cuda()
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate 112.00 MiB. GPU 
