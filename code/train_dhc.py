@@ -55,6 +55,8 @@ parser.add_argument('--cdba_unlabeled_warmup', type=int, default=100,
                     help='epoch to start including unlabeled voxels in CDBA E2P+P2E')
 parser.add_argument('--tau_var_cdba', type=float, default=5.0,
                     help='logsumexp temperature for var_term in g(z,c)')
+parser.add_argument('--class_adaptive_var', action='store_true', default=False,
+                    help='use per-class learnable lambda_var initialized from inverse baseline difficulty')
 parser.add_argument('--lambda_sac_cdba', type=float, default=0.1,
                     help='SAC weight in CDBA mode')
 parser.add_argument('--cdba_unlabeled_weight', type=float, default=0.5,
@@ -82,6 +84,10 @@ from utils.config import Config
 config = Config(args.task)
 if args.patience is not None:
     config.early_stop_patience = args.patience
+
+# Baseline DSC per class (Synapse 13-organ, ablation_baseline 3-seed mean)
+# Order: Aorta, GB, Spleen, L-Kidney, R-Kidney, Liver, Stomach, IVC, Portal, PSV, Pancreas, RAG, LAG
+_SYNAPSE_BASELINE_DSC = [78.2, 63.1, 52.2, 60.3, 47.5, 88.1, 33.5, 70.5, 58.7, 36.7, 22.6, 10.2, 3.0]
 
 
 
@@ -307,7 +313,8 @@ if __name__ == '__main__':
                       use_variation=_use_variation, num_variations=args.num_variations,
                       lambda_var=1.0, tau=args.tau_var, gamma=2.0, tau_r=0.8, lambda_r=1.0,
                       max_samples_per_class=args.max_samples_per_class,
-                      num_proxy_samples=args.num_proxy_samples, tau_var_cdba=args.tau_var_cdba).cuda()
+                      num_proxy_samples=args.num_proxy_samples, tau_var_cdba=args.tau_var_cdba,
+                      class_difficulty=_SYNAPSE_BASELINE_DSC if args.class_adaptive_var else None).cuda()
     optimizer_proxy_A = optim.SGD(list(proj_head_A.parameters()) + list(cs_loss_A.parameters()),
                                   lr=args.base_lr, momentum=0.9, weight_decay=3e-5, nesterov=True)
 
@@ -316,7 +323,8 @@ if __name__ == '__main__':
                       use_variation=_use_variation, num_variations=args.num_variations,
                       lambda_var=1.0, tau=args.tau_var, gamma=2.0, tau_r=0.8, lambda_r=1.0,
                       max_samples_per_class=args.max_samples_per_class,
-                      num_proxy_samples=args.num_proxy_samples, tau_var_cdba=args.tau_var_cdba).cuda()
+                      num_proxy_samples=args.num_proxy_samples, tau_var_cdba=args.tau_var_cdba,
+                      class_difficulty=_SYNAPSE_BASELINE_DSC if args.class_adaptive_var else None).cuda()
     optimizer_proxy_B = optim.SGD(list(proj_head_B.parameters()) + list(cs_loss_B.parameters()),
                                   lr=args.base_lr, momentum=0.9, weight_decay=3e-5, nesterov=True)
 
@@ -516,6 +524,12 @@ if __name__ == '__main__':
         if _use_variation:
             writer.add_scalar('proxy/variation_active',
                               float(cs_loss_A.variation_active), epoch_num)
+        if _use_variation and args.class_adaptive_var:
+            import torch.nn.functional as _F
+            _lvc = _F.softplus(cs_loss_A.lambda_var_logit).detach().cpu()
+            _cls = ['Aorta','GB','Spleen','LKid','RKid','Liver','Stomach','IVC','Portal','PSV','Pancreas','RAG','LAG']
+            writer.add_scalars('proxy/lambda_var_c',
+                               {n: _lvc[i].item() for i, n in enumerate(_cls)}, epoch_num)
         # print(dict(zip([i for i in range(config.num_cls)] ,print_func(weight_A))))
         writer.add_scalars('class_weights/A', dict(zip([str(i) for i in range(config.num_cls)] ,print_func(weight_A))), epoch_num)
         writer.add_scalars('class_weights/B', dict(zip([str(i) for i in range(config.num_cls)] ,print_func(weight_B))), epoch_num)

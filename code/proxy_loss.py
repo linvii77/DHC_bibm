@@ -83,6 +83,7 @@ class CompositionalSimilarityLoss(nn.Module):
         max_samples_per_class: int = 0,
         num_proxy_samples: int = 4,
         tau_var_cdba: float = 5.0,
+        class_difficulty: list[float] | None = None,
     ) -> None:
         super().__init__()
         if num_classes < 1:
@@ -109,6 +110,18 @@ class CompositionalSimilarityLoss(nn.Module):
         self.max_samples_per_class = max_samples_per_class
         self.num_proxy_samples = num_proxy_samples
         self.tau_var_cdba = tau_var_cdba
+        # Per-class variation weight: lambda_var_c = softplus(lambda_var_logit_c).
+        # When class_difficulty is given (list of baseline DSC per class, 0-100),
+        # harder classes start with higher lambda_var (inverse difficulty init).
+        if use_variation and class_difficulty is not None:
+            dsc = torch.tensor(class_difficulty, dtype=torch.float32) / 100.0
+            inv_diff = 1.0 / (dsc + 0.05)
+            inv_diff = inv_diff / inv_diff.mean()
+            init_val = inv_diff.clamp(0.2, 5.0)
+            init_logit = (init_val.exp() - 1.0).log()  # softplus_inverse
+        else:
+            init_logit = torch.full((num_classes,), 0.541)  # softplus(0.541) ≈ 1.0
+        self.lambda_var_logit = nn.Parameter(init_logit)
         # Runtime-toggleable switch for a "variation warmup" schedule: even
         # when use_variation=True (variation_vectors exists), forward()
         # behaves as combined=q_c (no p_sub term, no gradient to
@@ -343,7 +356,8 @@ class CompositionalSimilarityLoss(nn.Module):
             variations = F.normalize(self.variation_vectors, p=2, dim=-1)  # [C, K, D]
             var_sims = torch.einsum('nd,ckd->nck', x, variations)         # [N, C, K]
             var_term = torch.logsumexp(self.tau_var_cdba * var_sims, dim=-1) / self.tau_var_cdba
-            return rep_term + self.lambda_var * var_term
+            lambda_var_c = F.softplus(self.lambda_var_logit)  # [C,] positive
+            return rep_term + lambda_var_c.unsqueeze(0) * var_term
         return rep_term
 
     def forward_cdba(self, embeddings: torch.Tensor, targets=None) -> torch.Tensor:
