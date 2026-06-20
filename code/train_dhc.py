@@ -85,9 +85,9 @@ config = Config(args.task)
 if args.patience is not None:
     config.early_stop_patience = args.patience
 
-# Baseline DSC per class (Synapse 13-organ, ablation_baseline 3-seed mean)
-# Order: Aorta, GB, Spleen, L-Kidney, R-Kidney, Liver, Stomach, IVC, Portal, PSV, Pancreas, RAG, LAG
-_SYNAPSE_BASELINE_DSC = [78.2, 63.1, 52.2, 60.3, 47.5, 88.1, 33.5, 70.5, 58.7, 36.7, 22.6, 10.2, 3.0]
+# Baseline DSC per class (Synapse, ablation_baseline 3-seed mean; class 0=background)
+# Order: BG, Aorta, GB, Spleen, L-Kidney, R-Kidney, Liver, Stomach, IVC, Portal, PSV, Pancreas, RAG, LAG
+_SYNAPSE_BASELINE_DSC = [95.0, 78.2, 63.1, 52.2, 60.3, 47.5, 88.1, 33.5, 70.5, 58.7, 36.7, 22.6, 10.2, 3.0]
 
 
 
