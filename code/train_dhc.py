@@ -534,7 +534,7 @@ if __name__ == '__main__':
                 amp_grad_scaler.update()
 
                 # Gradient verification at step 5 (R6 / revision 1); encoder is a method not a module
-                if args.lambda_cs > 0 and iteration_num == 5 and epoch_num == 0:
+                if args.lambda_cs > 0 and iteration_num == 5 and epoch_num == 0 and not args.use_fused_proxy:
                     proxy_grad = cs_loss_A.proxy_dist.grad
                     backbone_grad = next(model_A.block_one.parameters()).grad
                     logging.info(f'[GradCheck] proxy_dist_A grad norm: '
@@ -563,7 +563,7 @@ if __name__ == '__main__':
         writer.add_scalar('loss/cs', np.mean(loss_cs_list), epoch_num)
         writer.add_scalar('proxy/lambda_cs_eff', effective_lambda_cs, epoch_num)
         writer.add_scalar('proxy/lambda_sac', args.lambda_sac, epoch_num)
-        if _use_variation:
+        if not args.use_fused_proxy and _use_variation:
             writer.add_scalar('proxy/variation_active',
                               float(cs_loss_A.variation_active), epoch_num)
         # print(dict(zip([i for i in range(config.num_cls)] ,print_func(weight_A))))
