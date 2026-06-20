@@ -57,6 +57,13 @@ parser.add_argument('--tau_var_cdba', type=float, default=5.0,
                     help='logsumexp temperature for var_term in g(z,c)')
 parser.add_argument('--lambda_sac_cdba', type=float, default=0.1,
                     help='SAC weight in CDBA mode')
+# GA loss fusion arguments (Phase 8a)
+parser.add_argument('--use_ga_loss', action='store_true', default=False,
+                    help='replace supervised CE+Dice with GADice+GACE for better HD95')
+parser.add_argument('--ga_k', type=int, default=10,
+                    help='GACE hard-mining percentile: keep top-k%% hardest pixels (default 10)')
+parser.add_argument('--ga_gama', type=float, default=0.5,
+                    help='GACE class-balance exponent: weight proportional to count^(1-gama) (default 0.5)')
 args = parser.parse_args()
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 
@@ -72,6 +79,7 @@ from models.vnet import VNet
 from proxy_loss import ProjectionHead, CompositionalSimilarityLoss
 from utils import EMA, maybe_mkdir, get_lr, fetch_data, seed_worker, poly_lr, print_func, kaiming_normal_init_weight
 from utils.loss import DC_and_CE_loss, RobustCrossEntropyLoss, SoftDiceLoss
+from utils.ga_loss import GADice, GACE as GACE_loss
 from data.transforms import RandomCrop, CenterCrop, ToTensor, RandomFlip_LR, RandomFlip_UD
 from data.data_loaders import Synapse_AMOS
 from utils.config import Config
@@ -333,6 +341,10 @@ if __name__ == '__main__':
     cps_loss_func_A = make_loss_function(args.cps_loss, weight_A)
     cps_loss_func_B = make_loss_function(args.cps_loss, weight_B)
 
+    if args.use_ga_loss:
+        ga_dice = GADice(GA=True)
+        ga_ce = GACE_loss(k=args.ga_k, gama=args.ga_gama)
+        logging.info(f'GA Loss: GADice(GA=True) + GACE(k={args.ga_k}, gama={args.ga_gama})')
 
     if args.mixed_precision:
         amp_grad_scaler = GradScaler()
@@ -397,12 +409,19 @@ if __name__ == '__main__':
                     weight_A = diffdw.cal_weights(output_A_l.detach(), label_l.detach())
                     weight_B = distdw.get_ema_weights(output_B_u.detach())
 
-                    loss_func_A.update_weight(weight_A)
-                    loss_func_B.update_weight(weight_B)
-                    cps_loss_func_A.update_weight(weight_A)
-                    cps_loss_func_B.update_weight(weight_B)
-
-                    loss_sup = loss_func_A(output_A_l, label_l) + loss_func_B(output_B_l, label_l)
+                    if args.use_ga_loss:
+                        cps_loss_func_A.update_weight(weight_A)
+                        cps_loss_func_B.update_weight(weight_B)
+                        out_A_soft = output_A_l.softmax(dim=1)
+                        out_B_soft = output_B_l.softmax(dim=1)
+                        loss_sup = (ga_ce(output_A_l, label_l) + ga_dice(out_A_soft, label_l) +
+                                    ga_ce(output_B_l, label_l) + ga_dice(out_B_soft, label_l))
+                    else:
+                        loss_func_A.update_weight(weight_A)
+                        loss_func_B.update_weight(weight_B)
+                        cps_loss_func_A.update_weight(weight_A)
+                        cps_loss_func_B.update_weight(weight_B)
+                        loss_sup = loss_func_A(output_A_l, label_l) + loss_func_B(output_B_l, label_l)
                     loss_cps = cps_loss_func_A(output_A, max_B) + cps_loss_func_B(output_B, max_A)
 
                     if args.lambda_cs > 0:
