@@ -57,6 +57,13 @@ parser.add_argument('--tau_var_cdba', type=float, default=5.0,
                     help='logsumexp temperature for var_term in g(z,c)')
 parser.add_argument('--lambda_sac_cdba', type=float, default=0.1,
                     help='SAC weight in CDBA mode')
+# FusedProxy arguments (Phase 8b)
+parser.add_argument('--use_fused_proxy', action='store_true', default=False,
+                    help='replace CSL+ProjectionHead with FusedProxyLoss (IDEA from GALoss)')
+parser.add_argument('--fused_proxy_samples', type=int, default=8,
+                    help='Monte-Carlo samples for rep_term in FusedProxyLoss (default 8)')
+parser.add_argument('--fused_lambda_var', type=float, default=1.0,
+                    help='lambda_var for FusedProxyLoss hard-max var_term (default 1.0)')
 # GA loss fusion arguments (Phase 8a)
 parser.add_argument('--use_ga_loss', action='store_true', default=False,
                     help='replace supervised CE+Dice with GADice+GACE for better HD95')
@@ -80,6 +87,7 @@ from proxy_loss import ProjectionHead, CompositionalSimilarityLoss
 from utils import EMA, maybe_mkdir, get_lr, fetch_data, seed_worker, poly_lr, print_func, kaiming_normal_init_weight
 from utils.loss import DC_and_CE_loss, RobustCrossEntropyLoss, SoftDiceLoss
 from utils.ga_loss import GADice, GACE as GACE_loss
+from utils.fused_proxy import FusedProxyLoss
 from data.transforms import RandomCrop, CenterCrop, ToTensor, RandomFlip_LR, RandomFlip_UD
 from data.data_loaders import Synapse_AMOS
 from utils.config import Config
@@ -303,26 +311,49 @@ if __name__ == '__main__':
     model_A = kaiming_normal_init_weight(model_A)
     model_B = kaiming_normal_init_weight(model_B)
 
-    # Proxy modules: one ProjectionHead + one CompositionalSimilarityLoss per model
-    # block_six feature: (B, 256, 8, 16, 16); variation_active defaults to True (R2)
-    _use_variation = True if args.use_cdba else args.use_variation
-    proj_head_A = ProjectionHead(in_channels=config.n_filters * 8, embedding_dim=args.embedding_dim, spatial_dims=3).cuda()
-    cs_loss_A   = CompositionalSimilarityLoss(num_classes=config.num_cls, embedding_dim=args.embedding_dim,
-                      use_variation=_use_variation, num_variations=args.num_variations,
-                      lambda_var=1.0, tau=args.tau_var, gamma=2.0, tau_r=0.8, lambda_r=1.0,
-                      max_samples_per_class=args.max_samples_per_class,
-                      num_proxy_samples=args.num_proxy_samples, tau_var_cdba=args.tau_var_cdba).cuda()
-    optimizer_proxy_A = optim.SGD(list(proj_head_A.parameters()) + list(cs_loss_A.parameters()),
-                                  lr=args.base_lr, momentum=0.9, weight_decay=3e-5, nesterov=True)
+    # Proxy modules: FusedProxyLoss (p8b) or legacy ProjectionHead+CSL (p7c)
+    if args.use_fused_proxy:
+        fused_proxy_A = FusedProxyLoss(
+            in_channels=config.n_filters * 8,
+            num_classes=config.num_cls,
+            embedding_dim=args.embedding_dim,
+            num_variations=args.num_variations,
+            lambda_var=args.fused_lambda_var,
+            proxy_samples=args.fused_proxy_samples,
+        ).cuda()
+        fused_proxy_B = FusedProxyLoss(
+            in_channels=config.n_filters * 8,
+            num_classes=config.num_cls,
+            embedding_dim=args.embedding_dim,
+            num_variations=args.num_variations,
+            lambda_var=args.fused_lambda_var,
+            proxy_samples=args.fused_proxy_samples,
+        ).cuda()
+        optimizer_proxy_A = optim.SGD(fused_proxy_A.parameters(),
+                                      lr=args.base_lr, momentum=0.9, weight_decay=3e-5, nesterov=True)
+        optimizer_proxy_B = optim.SGD(fused_proxy_B.parameters(),
+                                      lr=args.base_lr, momentum=0.9, weight_decay=3e-5, nesterov=True)
+        logging.info(f'FusedProxy: embedding_dim={args.embedding_dim}, num_variations={args.num_variations}, '
+                     f'lambda_var={args.fused_lambda_var}, proxy_samples={args.fused_proxy_samples}')
+    else:
+        _use_variation = True if args.use_cdba else args.use_variation
+        proj_head_A = ProjectionHead(in_channels=config.n_filters * 8, embedding_dim=args.embedding_dim, spatial_dims=3).cuda()
+        cs_loss_A   = CompositionalSimilarityLoss(num_classes=config.num_cls, embedding_dim=args.embedding_dim,
+                          use_variation=_use_variation, num_variations=args.num_variations,
+                          lambda_var=1.0, tau=args.tau_var, gamma=2.0, tau_r=0.8, lambda_r=1.0,
+                          max_samples_per_class=args.max_samples_per_class,
+                          num_proxy_samples=args.num_proxy_samples, tau_var_cdba=args.tau_var_cdba).cuda()
+        optimizer_proxy_A = optim.SGD(list(proj_head_A.parameters()) + list(cs_loss_A.parameters()),
+                                      lr=args.base_lr, momentum=0.9, weight_decay=3e-5, nesterov=True)
 
-    proj_head_B = ProjectionHead(in_channels=config.n_filters * 8, embedding_dim=args.embedding_dim, spatial_dims=3).cuda()
-    cs_loss_B   = CompositionalSimilarityLoss(num_classes=config.num_cls, embedding_dim=args.embedding_dim,
-                      use_variation=_use_variation, num_variations=args.num_variations,
-                      lambda_var=1.0, tau=args.tau_var, gamma=2.0, tau_r=0.8, lambda_r=1.0,
-                      max_samples_per_class=args.max_samples_per_class,
-                      num_proxy_samples=args.num_proxy_samples, tau_var_cdba=args.tau_var_cdba).cuda()
-    optimizer_proxy_B = optim.SGD(list(proj_head_B.parameters()) + list(cs_loss_B.parameters()),
-                                  lr=args.base_lr, momentum=0.9, weight_decay=3e-5, nesterov=True)
+        proj_head_B = ProjectionHead(in_channels=config.n_filters * 8, embedding_dim=args.embedding_dim, spatial_dims=3).cuda()
+        cs_loss_B   = CompositionalSimilarityLoss(num_classes=config.num_cls, embedding_dim=args.embedding_dim,
+                          use_variation=_use_variation, num_variations=args.num_variations,
+                          lambda_var=1.0, tau=args.tau_var, gamma=2.0, tau_r=0.8, lambda_r=1.0,
+                          max_samples_per_class=args.max_samples_per_class,
+                          num_proxy_samples=args.num_proxy_samples, tau_var_cdba=args.tau_var_cdba).cuda()
+        optimizer_proxy_B = optim.SGD(list(proj_head_B.parameters()) + list(cs_loss_B.parameters()),
+                                      lr=args.base_lr, momentum=0.9, weight_decay=3e-5, nesterov=True)
 
     logging.info(f'Proxy: use_variation={_use_variation}, use_cdba={args.use_cdba}, lambda_cs={args.lambda_cs}, '
                  f'embedding_dim={args.embedding_dim}, num_variations={args.num_variations}, '
@@ -359,11 +390,15 @@ if __name__ == '__main__':
 
         model_A.train()
         model_B.train()
-        proj_head_A.train()
-        proj_head_B.train()
+        if args.use_fused_proxy:
+            fused_proxy_A.train()
+            fused_proxy_B.train()
+        else:
+            proj_head_A.train()
+            proj_head_B.train()
 
-        # variation_warmup: keep variation_active=False until warmup period ends
-        if _use_variation and args.variation_warmup > 0:
+        # variation_warmup: keep variation_active=False until warmup period ends (legacy CSL only)
+        if not args.use_fused_proxy and _use_variation and args.variation_warmup > 0:
             active = (epoch_num >= args.variation_warmup)
             cs_loss_A.variation_active = active
             cs_loss_B.variation_active = active
@@ -425,7 +460,12 @@ if __name__ == '__main__':
                     loss_cps = cps_loss_func_A(output_A, max_B) + cps_loss_func_B(output_B, max_A)
 
                     if args.lambda_cs > 0:
-                        if args.use_cdba:
+                        if args.use_fused_proxy:
+                            # FusedProxy: projects internally, CDBA on full batch (μ/σ detached), SAC on labeled
+                            loss_cdba_A, loss_sac_A, _ = fused_proxy_A(feat_A, label_l, labeled_bs=tmp_bs)
+                            loss_cdba_B, loss_sac_B, _ = fused_proxy_B(feat_B, label_l, labeled_bs=tmp_bs)
+                            loss_cs = (loss_cdba_A + loss_cdba_B) + args.lambda_sac_cdba * (loss_sac_A + loss_sac_B)
+                        elif args.use_cdba:
                             # CDBA mode: proj_head runs on ALL patches (labeled + unlabeled)
                             emb_A_all = proj_head_A(feat_A)
                             emb_B_all = proj_head_B(feat_B)
